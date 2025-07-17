@@ -63,7 +63,7 @@ namespace MsgPackExplorer
       EndianChoice choice = ddEndianess.SelectedItem as EndianChoice;
       if (choice is null)
         return;
-      msgPackExplorer1.EndianHandling = choice.Value;
+      msgPackExplorer1.EndianHandling = (LsMsgPackExplorer.EndianAction)choice.Value;
       msgPackExplorer1.Data = msgPackExplorer1.Data;
     }
 

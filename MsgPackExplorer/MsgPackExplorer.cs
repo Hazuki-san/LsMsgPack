@@ -1,12 +1,14 @@
-﻿using LsMsgPack;
-
-using System;
+﻿using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Drawing;
+using System.IO;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Forms;
+using CustomMsgPack;
 
 namespace MsgPackExplorer
 {
@@ -17,11 +19,12 @@ namespace MsgPackExplorer
             InitializeComponent();
         }
 
-        private MsgPackItem item;
+        private CustomMsgPackItem item;
+
         [Category("MsgPack")]
         [DisplayName("Item")]
-        [Description("The root element of a MsgPack message. If you have the choice rather populate Data so the original stream can be displayed in the hex editor.")]
-        public MsgPackItem Item
+        [Description("The root element of a MsgPack message.")]
+        public CustomMsgPackItem Item
         {
             get { return item; }
             set
@@ -40,13 +43,38 @@ namespace MsgPackExplorer
             get { return _continueOnError; }
             set
             {
-                if (value != _continueOnError)
-                {
-                    _continueOnError = value;
-                    if (!ReferenceEquals(data, null) && data.Length > 0) Data = data;
-                }
+                _continueOnError = value;
             }
         }
+
+        private long _displayLimit = 1000;
+        [Category("MsgPack")]
+        [DisplayName("Limit items")]
+        [Description("Limit the number of items that are displayed when many items are processed.")]
+        public long DisplayLimit
+        {
+            get { return _displayLimit; }
+            set { _displayLimit = value; }
+        }
+
+        public enum EndianAction
+        {
+            SwapIfCurrentSystemIsLittleEndian,
+            NeverSwap,
+            AlwaysSwap,
+        }
+
+
+        private EndianAction _endianHandling = EndianAction.SwapIfCurrentSystemIsLittleEndian;
+        [Category("MsgPack")]
+        [DisplayName("Endian handling")]
+        [Description("Override Endianess conversion (default will reorder bytes on little-endian systems).")]
+        public EndianAction EndianHandling
+        {
+            get { return _endianHandling; }
+            set { _endianHandling = value; }
+        }
+
 
         private byte[] data;
         [Category("MsgPack")]
@@ -61,44 +89,12 @@ namespace MsgPackExplorer
                 if (ReferenceEquals(value, null)) Item = null;
                 else
                 {
-
-                    MsgPackSettings settings = new MsgPackSettings()
-                    {
-                        DynamicallyCompact = false,
-                        PreservePackages = true,
-                        ContinueProcessingOnBreakingError = _continueOnError,
-                        EndianAction = _endianHandling
-                    };
-
-                    MpRoot root = MsgPackItem.UnpackMultiple(data, settings);
-                    Item = root?.Count == 1 ? root[0] : root;
+                    var packer = new CustomBoxingPacker();
+                    Item = packer.Unpack(data);
                 }
             }
         }
 
-        private long _displayLimit = 1000;
-        [Category("MsgPack")]
-        [DisplayName("Limit items")]
-        [Description("Limit the number of items that are displayed when many items are processed.")]
-        public long DisplayLimit
-        {
-            get { return _displayLimit; }
-            set { _displayLimit = value; }
-        }
-
-        private EndianAction _endianHandling = EndianAction.SwapIfCurrentSystemIsLittleEndian;
-        [Category("MsgPack")]
-        [DisplayName("Endian handling")]
-        [Description("Override Endianess conversion (default will reorder bytes on little-endian systems).")]
-        public EndianAction EndianHandling
-        {
-            get { return _endianHandling; }
-            set { _endianHandling = value; }
-        }
-
-        /// <summary>
-        /// Clears all the data and starts with an empty slate
-        /// </summary>
         public void Clear()
         {
             Data = null;
@@ -123,7 +119,7 @@ namespace MsgPackExplorer
             public int CharOffset = 0;
             public int Length = 0;
             public TreeNode Node;
-            public MsgPackItem Item;
+            public CustomMsgPackItem Item;
         }
 
         public void RefreshTree()
@@ -142,35 +138,26 @@ namespace MsgPackExplorer
                 if (ReferenceEquals(item, null)) return;
 
                 TreeNode root = GetTreeNodeFor(item);
-                _nodeCount = 0;
                 Traverse(root, item);
-                if (_nodeCount > _displayLimit)
-                    root.Nodes.Add(string.Concat("Limit of ", _displayLimit, " displayed items reached..."));
 
                 treeView1.Nodes.Add(root);
                 treeView1.ExpandAll();
-                if (ReferenceEquals(data, null) || data.Length == 0) data = item.ToBytes();
-                //richTextBox1.Text = BitConverter.ToString(data).Replace('-', ' ');
+                if (ReferenceEquals(data, null) || data.Length == 0) return;
 
                 string[] hex = BitConverter.ToString(data).Split('-');
                 StringBuilder sb = new StringBuilder("{\\rtf1 {\\colortbl ;\\red255\\green0\\blue0;\\red0\\green77\\blue187;\\red127\\green127\\blue127;}\r\n");
                 int byteOffset = 0;
 
                 EditorMetaData meta = null;
-                byteOffset = AddParts(hex, root, byteOffset, sb, ref meta);
 
                 if (!ReferenceEquals(meta, null) && !ReferenceEquals(meta.Item, null))
                 {
-                    while (meta.Item.StoredOffset + meta.Item.StoredLength > byteOffset)
+                    while (byteOffset < data.Length)
                     {
                         sb.Append(hex[byteOffset]).Append(' ');
                         byteOffset++;
-                        meta.Length++;
                     }
                 }
-
-                meta = (EditorMetaData)item.Tag;
-                meta.Length = byteOffset;
 
                 if (hex.Length - 1 > byteOffset) sb.Append("\\cf3 "); // gray
                 while (hex.Length - 1 > byteOffset)
@@ -192,188 +179,57 @@ namespace MsgPackExplorer
             }
         }
 
-        private int AddParts(string[] hex, TreeNode node, int byteOffset, StringBuilder sb, ref EditorMetaData previousMeta)
-        {
-            MsgPackItem item = (MsgPackItem)node.Tag;
-            if (ReferenceEquals(item, null)) return byteOffset;
-            int additionalBytes = 0;
-            while (item.StoredOffset > byteOffset)
-            {
-                sb.Append(hex[byteOffset]).Append(' ');
-                byteOffset++;
-                additionalBytes++;
-            }
-            if (additionalBytes > 0)
-            {
-                previousMeta.Length += additionalBytes;
-                TreeNode parent = previousMeta.Node.Parent;
-                while (!ReferenceEquals(parent, null))
-                {
-                    ((EditorMetaData)((MsgPackItem)parent.Tag).Tag).Length += additionalBytes;
-                    parent = parent.Parent;
-                }
-            }
-
-            EditorMetaData meta = new EditorMetaData()
-            {
-                CharOffset = byteOffset * 3,
-                Node = node,
-                Item = item
-            };
-            lineairList.Add(meta);
-            item.Tag = meta;
-            previousMeta = meta;
-
-            if (!ReferenceEquals(item, null) && !(item is MpError && !ReferenceEquals(((MpError)item).PartialItem, null)) && !(item is MpRoot) && byteOffset < hex.Length)
-            {
-                sb.Append("\\cf1 "); // red
-                sb.Append(hex[byteOffset]).Append(' ');
-                byteOffset++;
-            }
-
-            if (item is MsgPackVarLen)
-            {
-                int lengthBytes = 0;
-                switch (item.TypeId)
-                {
-                    case MsgPackTypeId.MpBin8: lengthBytes = 1; break;
-                    case MsgPackTypeId.MpBin16: lengthBytes = 2; break;
-                    case MsgPackTypeId.MpBin32: lengthBytes = 4; break;
-                    case MsgPackTypeId.MpStr8: lengthBytes = 1; break;
-                    case MsgPackTypeId.MpStr16: lengthBytes = 2; break;
-                    case MsgPackTypeId.MpStr32: lengthBytes = 4; break;
-                    case MsgPackTypeId.MpMap16: lengthBytes = 2; break;
-                    case MsgPackTypeId.MpMap32: lengthBytes = 4; break;
-                    case MsgPackTypeId.MpArray16: lengthBytes = 2; break;
-                    case MsgPackTypeId.MpArray32: lengthBytes = 4; break;
-                    case MsgPackTypeId.MpExt8: lengthBytes = 1; break;
-                    case MsgPackTypeId.MpExt16: lengthBytes = 2; break;
-                    case MsgPackTypeId.MpExt32: lengthBytes = 4; break;
-                }
-                if (lengthBytes > 0)
-                {
-                    sb.Append("\\cf2 "); // blue
-                    for (int t = lengthBytes - 1; t >= 0; t--)
-                    {
-                        sb.Append(hex[byteOffset]).Append(' ');
-                        byteOffset++;
-                    }
-                }
-            }
-            sb.Append("\\cf0 "); // black
-
-            for (int t = 0; t < node.Nodes.Count; t++)
-            {
-                byteOffset = AddParts(hex, node.Nodes[t], byteOffset, sb, ref previousMeta);
-            }
-
-            ValidateItem(meta);
-
-            meta.Length = (byteOffset - (int)item.StoredOffset);
-            return byteOffset;
-        }
-
-        private TreeNode GetTreeNodeFor(MsgPackItem item)
+        private TreeNode GetTreeNodeFor(CustomMsgPackItem item)
         {
             int imgIdx = GetIconFor(item);
             string text = ReferenceEquals(item, null) ? "NULL" : item.ToString();
             int pos = text.IndexOfAny(new char[] { '\r', '\n' });
             if (pos > 0) text = text.Substring(0, pos - 1);
             TreeNode node = new TreeNode(text, imgIdx, imgIdx);
-            if (ReferenceEquals(item, null) || item.IsBestGuess) node.ForeColor = Color.DarkGray;
             node.Tag = item;
             return node;
         }
 
-        long _nodeCount = 0;
-
-        private void Traverse(TreeNode node, MsgPackItem item)
+        private void Traverse(TreeNode node, CustomMsgPackItem item)
         {
-            _nodeCount++;
-            if (_nodeCount > _displayLimit)
-                return;
             if (ReferenceEquals(item, null)) return;
-            Type typ = item.GetType();
-            if (typ == typeof(MpBool)) return;
-            if (typ == typeof(MpInt)) return;
-            if (typ == typeof(MpFloat)) return;
-            if (typ == typeof(MpBin)) return;
-            if (typ == typeof(MpString)) return;
-            if (typ == typeof(MpRoot))
+
+            if (item is CustomMpArray arr)
             {
-                MpRoot root = (MpRoot)item;
-                MsgPackItem[] children = (MsgPackItem[])root.Value;
-                for (int t = 0; t < children.Length; t++)
+                foreach (var childItem in arr.Items)
                 {
-                    TreeNode child = GetTreeNodeFor(children[t]);
-                    node.Nodes.Add(child);
-                    Traverse(child, children[t]);
-                    if (_nodeCount > _displayLimit)
-                        return;
+                    TreeNode childNode = GetTreeNodeFor(childItem);
+                    node.Nodes.Add(childNode);
+                    Traverse(childNode, childItem);
                 }
             }
-            if (typ == typeof(MpArray))
+            else if (item is CustomMpMap map)
             {
-                MpArray arr = (MpArray)item;
-                MsgPackItem[] children = arr.PackedValues;
-                for (int t = 0; t < children.Length; t++)
+                foreach (var kvp in map.Items)
                 {
-                    TreeNode child = GetTreeNodeFor(children[t]);
-                    node.Nodes.Add(child);
-                    Traverse(child, children[t]);
-                    if (_nodeCount > _displayLimit)
-                        return;
-                }
-            }
-            if (typ == typeof(MpMap))
-            {
-                MpMap map = (MpMap)item;
-                KeyValuePair<MsgPackItem, MsgPackItem>[] children = map.PackedValues;
-                for (int t = 0; t < children.Length; t++)
-                {
-                    TreeNode child = GetTreeNodeFor(children[t].Key);
-                    child.StateImageIndex = 8; // Key
-                    node.Nodes.Add(child);
-                    Traverse(child, children[t].Key);
-                    if (_nodeCount > _displayLimit)
-                        return;
-                    TreeNode childVal = GetTreeNodeFor(children[t].Value);
-                    childVal.StateImageIndex = 9; // Value
-                    child.Nodes.Add(childVal);
-                    Traverse(childVal, children[t].Value);
-                    if (_nodeCount > _displayLimit)
-                        return;
-                }
-            }
-            if (typ == typeof(MpError))
-            {
-                MpError err = (MpError)item;
-                if (!ReferenceEquals(err.PartialItem, null))
-                {
-                    if (!(err.PartialItem is MpError)) node.StateImageIndex = GetIconFor(err.PartialItem);
-                    TreeNode child = GetTreeNodeFor(err.PartialItem);
-                    node.Nodes.Add(child);
-                    Traverse(child, err.PartialItem);
-                    if (_nodeCount > _displayLimit)
-                        return;
+                    TreeNode keyNode = GetTreeNodeFor(kvp.Key);
+                    keyNode.StateImageIndex = 8; // Key
+                    node.Nodes.Add(keyNode);
+                    Traverse(keyNode, kvp.Key);
+
+                    TreeNode valueNode = GetTreeNodeFor(kvp.Value);
+                    valueNode.StateImageIndex = 9; // Value
+                    keyNode.Nodes.Add(valueNode);
+                    Traverse(valueNode, kvp.Value);
                 }
             }
         }
 
-        private int GetIconFor(MsgPackItem item)
+        private int GetIconFor(CustomMsgPackItem item)
         {
-            if (ReferenceEquals(item, null)) return 0;
-            Type typ = item.GetType();
-            if (typ == typeof(MpBool)) return 1;
-            if (typ == typeof(MpInt)) return 2;
-            if (typ == typeof(MpFloat)) return 3;
-            if (typ == typeof(MpBin)) return 4;
-            if (typ == typeof(MpString)) return 5;
-            if (typ == typeof(MpArray)) return 6;
-            if (typ == typeof(MpMap)) return 7;
-            if (typ == typeof(MpExt)) return 10;
-            if (typ == typeof(MpError)) return 11;
-            if (typ == typeof(MpRoot)) return 12;
+            if (item is CustomMpNull) return 0;
+            if (item is CustomMpBoolean) return 1;
+            if (item is CustomMpInteger) return 2;
+            if (item is CustomMpFloat) return 3;
+            if (item is CustomMpBinary) return 4;
+            if (item is CustomMpString) return 5;
+            if (item is CustomMpArray) return 6;
+            if (item is CustomMpMap) return 7;
             return -1;
         }
 
@@ -386,173 +242,317 @@ namespace MsgPackExplorer
             if (ReferenceEquals(e.Node, null))
             {
                 propertyGrid1.SelectedObject = null;
-                ColorSelectedNodeInHexView(null);
-                ClearValidationSelection();
+                return;
             }
-            else
-            {
-                propertyGrid1.SelectedObject = e.Node.Tag;
-                propertyGrid1.ExpandAllGridItems();
 
-                MsgPackItem item = e.Node.Tag as MsgPackItem;
-                if (ReferenceEquals(item, null))
-                {
-                    statusOffset.Text = "0 (0x00)";
-                    ColorSelectedNodeInHexView(null);
-                }
-                else
-                {
-                    statusOffset.Text = string.Concat(item.StoredOffset, " (0x", item.StoredOffset.ToString("X"), ")");
-                    EditorMetaData meta = item.Tag as EditorMetaData;
-                    ColorSelectedNodeInHexView(meta);
-                }
-
-                if (!lvSelecting)
-                {
-                    lvSelecting = true;
-                    try
-                    {
-                        for (int t = listView1.Items.Count - 1; t >= 0; t--)
-                        {
-                            bool select = listView1.Items[t].Tag == e.Node;
-                            listView1.Items[t].Selected = select;
-                        }
-                    }
-                    finally
-                    {
-                        lvSelecting = false;
-                        errorDetails.Visible = false;
-                        splitter4.Visible = false;
-                    }
-                }
-            }
+            propertyGrid1.SelectedObject = e.Node.Tag;
+            propertyGrid1.ExpandAllGridItems();
         }
 
-        private void ClearValidationSelection()
-        {
-            for (int t = listView1.Items.Count - 1; t >= 0; t--)
-            {
-                listView1.Items[t].Selected = false;
-            }
-        }
-
-        private void ColorSelectedNodeInHexView(EditorMetaData meta)
-        {
-            int preserveSelStart = richTextBox1.SelectionStart;
-            int preserveSelLength = richTextBox1.SelectionLength;
-            bool preserveSelecting = rtbSelecting;
-
-            rtbSelecting = true;
-            SendMessage(richTextBox1.Handle, WM_SETREDRAW, (IntPtr)0, IntPtr.Zero);
-            try
-            {
-                richTextBox1.SelectAll();
-                richTextBox1.SelectionBackColor = richTextBox1.BackColor;
-
-                if (!ReferenceEquals(meta, null))
-                {
-                    richTextBox1.SelectionStart = meta.CharOffset;
-                    richTextBox1.SelectionLength = meta.Length * 3;
-
-                    richTextBox1.SelectionBackColor = Color.LightGreen;
-                }
-
-                if (!preserveSelecting)
-                {
-                    richTextBox1.ScrollToCaret();
-                    richTextBox1.SelectionLength = 0;
-                }
-                else
-                {
-                    richTextBox1.SelectionStart = preserveSelStart;
-                    richTextBox1.SelectionLength = preserveSelLength;
-                }
-            }
-            finally
-            {
-                SendMessage(richTextBox1.Handle, WM_SETREDRAW, (IntPtr)1, IntPtr.Zero);
-                richTextBox1.Invalidate();
-                rtbSelecting = preserveSelecting;
-            }
-        }
-
-        bool rtbSelecting = false;
         private void richTextBox1_SelectionChanged(object sender, EventArgs e)
         {
-            if (rtbSelecting) return;
-            rtbSelecting = true;
-            try
-            {
-                for (int t = lineairList.Count - 1; t >= 0; t--)
-                {
-                    if (lineairList[t].CharOffset <= richTextBox1.SelectionStart)
-                    {
-                        treeView1.SelectedNode = lineairList[t].Node;
-                        return;
-                    }
-                }
-            }
-            finally
-            {
-                rtbSelecting = false;
-            }
+            // For future implementation if needed
         }
-
-        private bool lvSelecting = false;
 
         private void listView1_SelectedIndexChanged(object sender, EventArgs e)
         {
-            if (lvSelecting) return;
-            lvSelecting = true;
-            try
-            {
-                if (listView1.SelectedItems.Count <= 0)
-                {
-                    treeView1.SelectedNode = null;
-                    errorDetails.Visible = false;
-                    splitter4.Visible = false;
-                    return;
-                }
-                errorDetails.Text = listView1.SelectedItems[0].SubItems[1].Text;
-                splitter4.Visible = true;
-                errorDetails.Visible = true;
-                treeView1.SelectedNode = (TreeNode)listView1.SelectedItems[0].Tag;
-            }
-            finally
-            {
-                lvSelecting = false;
-            }
+            // For future implementation if needed
         }
 
         private void treeView1_DrawNode(object sender, DrawTreeNodeEventArgs e)
         {
             e.DrawDefault = true;
         }
+    }
+}
 
-        private void ValidateItem(EditorMetaData meta)
+namespace CustomMsgPack
+{
+    public abstract class CustomMsgPackItem
+    {
+        public abstract object Value { get; set; }
+        public abstract string TypeName { get; }
+        public override string ToString()
         {
-            MsgPackValidation.ValidationItem[] issues = MsgPackValidation.ValidateItem(meta.Item, DisplayLimit);
+            return $"{TypeName}: {Value}";
+        }
+    }
 
-            for (int t = issues.Length - 1; t >= 0; t--)
+    public class CustomMpNull : CustomMsgPackItem
+    {
+        public override object Value { get; set; } = null;
+        public override string TypeName => "Null";
+        public override string ToString() => "[NULL]";
+    }
+
+    public class CustomMpBoolean : CustomMsgPackItem
+    {
+        public override object Value { get; set; }
+        public override string TypeName => "Boolean";
+    }
+
+    public class CustomMpInteger : CustomMsgPackItem
+    {
+        public override object Value { get; set; }
+        public override string TypeName => "Integer";
+    }
+
+    public class CustomMpFloat : CustomMsgPackItem
+    {
+        public override object Value { get; set; }
+        public override string TypeName => "Float";
+    }
+
+    public class CustomMpString : CustomMsgPackItem
+    {
+        public override object Value { get; set; }
+        public override string TypeName => "String";
+    }
+
+    public class CustomMpBinary : CustomMsgPackItem
+    {
+        public override object Value { get; set; }
+        public override string TypeName => "Binary";
+        public override string ToString()
+        {
+            if (Value is byte[] bytes)
             {
-                if (issues.Length - t > DisplayLimit)
-                    return;
+                return $"Binary: {bytes.Length} bytes";
+            }
+            return "Binary: (empty)";
+        }
+    }
 
-                AddValidationItem(issues[t].WaistedBytes, meta, issues[t].Severity, issues[t].Message);
+    public class CustomMpArray : CustomMsgPackItem
+    {
+        public override object Value { get; set; }
+        public override string TypeName => "Array";
+        public CustomMsgPackItem[] Items { get; set; }
+        public override string ToString()
+        {
+            return $"Array ({(Items?.Length ?? 0)} items)";
+        }
+    }
+
+    public class CustomMpMap : CustomMsgPackItem
+    {
+        public override object Value { get; set; }
+        public override string TypeName => "Map";
+        public KeyValuePair<CustomMsgPackItem, CustomMsgPackItem>[] Items { get; set; }
+        public override string ToString()
+        {
+            return $"Map ({(Items?.Length ?? 0)} items)";
+        }
+    }
+
+    public class CustomBoxingPacker
+    {
+        public CustomMsgPackItem Unpack(byte[] buf)
+        {
+            using (var ms = new MemoryStream(buf))
+            {
+                var reader = new CustomMsgPackReader(ms);
+                return Unpack(reader);
             }
         }
 
-        private void AddValidationItem(int waistedBytes, EditorMetaData meta, MsgPackValidation.ValidationSeverity sev, string message)
+        private CustomMsgPackItem Unpack(CustomMsgPackReader reader)
         {
-            int iconId = (meta.Item.TypeId == MsgPackTypeId.NeverUsed) ? -1 : GetIconFor(meta.Item);
-            ListViewItem lvi = new ListViewItem(waistedBytes.ToString(), iconId);
-            lvi.StateImageIndex = (int)sev;
+            if (!reader.Read())
+            {
+                throw new FormatException();
+            }
 
-            lvi.SubItems.Add(message);
-            lvi.Tag = meta.Node;
-            listView1.Items.Add(lvi);
+            switch (reader.Type)
+            {
+                case TypePrefixes.PositiveFixNum:
+                case TypePrefixes.Int8:
+                case TypePrefixes.Int16:
+                case TypePrefixes.Int32:
+                case TypePrefixes.NegativeFixNum:
+                    return new CustomMpInteger { Value = reader.ValueSigned };
+                case TypePrefixes.Int64:
+                    return new CustomMpInteger { Value = reader.ValueSigned64 };
+                case TypePrefixes.UInt8:
+                case TypePrefixes.UInt16:
+                case TypePrefixes.UInt32:
+                    return new CustomMpInteger { Value = reader.ValueUnsigned };
+                case TypePrefixes.UInt64:
+                    return new CustomMpInteger { Value = reader.ValueUnsigned64 };
+                case TypePrefixes.True:
+                    return new CustomMpBoolean { Value = true };
+                case TypePrefixes.False:
+                    return new CustomMpBoolean { Value = false };
+                case TypePrefixes.Float:
+                    return new CustomMpFloat { Value = reader.ValueFloat };
+                case TypePrefixes.Double:
+                    return new CustomMpFloat { Value = reader.ValueDouble };
+                case TypePrefixes.Nil:
+                    return new CustomMpNull();
+                case TypePrefixes.FixRaw:
+                case TypePrefixes.Raw8:
+                case TypePrefixes.Raw16:
+                case TypePrefixes.Raw32:
+                    {
+                        byte[] array2 = new byte[reader.Length];
+                        reader.ReadValueRaw(array2, 0, array2.Length);
+                        try
+                        {
+                            // Try to decode as string
+                            return new CustomMpString { Value = Encoding.UTF8.GetString(array2) };
+                        }
+                        catch
+                        {
+                            // If it fails, treat as binary
+                            return new CustomMpBinary { Value = array2 };
+                        }
+                    }
+                case TypePrefixes.FixArray:
+                case TypePrefixes.Array16:
+                case TypePrefixes.Array32:
+                    {
+                        var items = new CustomMsgPackItem[reader.Length];
+                        for (int i = 0; i < items.Length; i++)
+                        {
+                            items[i] = Unpack(reader);
+                        }
+                        return new CustomMpArray { Items = items, Value = items };
+                    }
+                case TypePrefixes.FixMap:
+                case TypePrefixes.Map16:
+                case TypePrefixes.Map32:
+                    {
+                        var items = new KeyValuePair<CustomMsgPackItem, CustomMsgPackItem>[reader.Length];
+                        for (int i = 0; i < items.Length; i++)
+                        {
+                            var key = Unpack(reader);
+                            var value = Unpack(reader);
+                            items[i] = new KeyValuePair<CustomMsgPackItem, CustomMsgPackItem>(key, value);
+                        }
+                        return new CustomMpMap { Items = items, Value = items };
+                    }
+                default:
+                    throw new FormatException();
+            }
+        }
+    }
+
+    public class CustomMsgPackReader
+    {
+        private Stream _strm;
+        private byte[] _tmp0 = new byte[8];
+        private byte[] _tmp1 = new byte[8];
+
+        public TypePrefixes Type { get; private set; }
+        public bool ValueBoolean { get; private set; }
+        public uint Length { get; private set; }
+        public uint ValueUnsigned { get; private set; }
+        public ulong ValueUnsigned64 { get; private set; }
+        public int ValueSigned { get; private set; }
+        public long ValueSigned64 { get; private set; }
+        public float ValueFloat { get; private set; }
+        public double ValueDouble { get; private set; }
+
+        public CustomMsgPackReader(Stream strm)
+        {
+            _strm = strm;
         }
 
+        public bool Read()
+        {
+            byte[] tmp = _tmp0;
+            byte[] tmp2 = _tmp1;
+            int num = _strm.ReadByte();
+            if (num < 0) return false;
 
+            if (num >= 0 && num <= 127) Type = TypePrefixes.PositiveFixNum;
+            else if (num >= 224 && num <= 255) Type = TypePrefixes.NegativeFixNum;
+            else if (num >= 160 && num <= 191) Type = TypePrefixes.FixRaw;
+            else if (num >= 144 && num <= 159) Type = TypePrefixes.FixArray;
+            else if (num >= 128 && num <= 143) Type = TypePrefixes.FixMap;
+            else Type = (TypePrefixes)num;
+
+            switch (Type)
+            {
+                case TypePrefixes.False: ValueBoolean = false; break;
+                case TypePrefixes.True: ValueBoolean = true; break;
+                case TypePrefixes.Float:
+                    _strm.Read(tmp, 0, 4);
+                    if (BitConverter.IsLittleEndian)
+                    {
+                        tmp2[0] = tmp[3]; tmp2[1] = tmp[2]; tmp2[2] = tmp[1]; tmp2[3] = tmp[0];
+                        ValueFloat = BitConverter.ToSingle(tmp2, 0);
+                    }
+                    else ValueFloat = BitConverter.ToSingle(tmp, 0);
+                    break;
+                case TypePrefixes.Double:
+                    _strm.Read(tmp, 0, 8);
+                    if (BitConverter.IsLittleEndian)
+                    {
+                        tmp2[0] = tmp[7]; tmp2[1] = tmp[6]; tmp2[2] = tmp[5]; tmp2[3] = tmp[4];
+                        tmp2[4] = tmp[3]; tmp2[5] = tmp[2]; tmp2[6] = tmp[1]; tmp2[7] = tmp[0];
+                        ValueDouble = BitConverter.ToDouble(tmp2, 0);
+                    }
+                    else ValueDouble = BitConverter.ToDouble(tmp, 0);
+                    break;
+                case TypePrefixes.NegativeFixNum: ValueSigned = (sbyte)num; break;
+                case TypePrefixes.PositiveFixNum: ValueUnsigned = (byte)num; ValueSigned = (sbyte)num; break;
+                case TypePrefixes.UInt8: ValueUnsigned = (byte)_strm.ReadByte(); break;
+                case TypePrefixes.UInt16: _strm.Read(tmp, 0, 2); ValueUnsigned = (uint)((tmp[0] << 8) | tmp[1]); break;
+                case TypePrefixes.UInt32: _strm.Read(tmp, 0, 4); ValueUnsigned = (uint)((tmp[0] << 24) | (tmp[1] << 16) | (tmp[2] << 8) | tmp[3]); break;
+                case TypePrefixes.UInt64: _strm.Read(tmp, 0, 8); ValueUnsigned64 = (((ulong)tmp[0] << 56) | ((ulong)tmp[1] << 48) | ((ulong)tmp[2] << 40) | ((ulong)tmp[3] << 32) | ((ulong)tmp[4] << 24) | ((ulong)tmp[5] << 16) | ((ulong)tmp[6] << 8) | tmp[7]); break;
+                case TypePrefixes.Int8: ValueSigned = (sbyte)_strm.ReadByte(); break;
+                case TypePrefixes.Int16: _strm.Read(tmp, 0, 2); ValueSigned = (short)((tmp[0] << 8) | tmp[1]); break;
+                case TypePrefixes.Int32: _strm.Read(tmp, 0, 4); ValueSigned = (int)((tmp[0] << 24) | (tmp[1] << 16) | (tmp[2] << 8) | tmp[3]); break;
+                case TypePrefixes.Int64: _strm.Read(tmp, 0, 8); ValueSigned64 = (long)(((ulong)tmp[0] << 56) | ((ulong)tmp[1] << 48) | ((ulong)tmp[2] << 40) | ((ulong)tmp[3] << 32) | ((ulong)tmp[4] << 24) | ((ulong)tmp[5] << 16) | ((ulong)tmp[6] << 8) | tmp[7]); break;
+                case TypePrefixes.FixRaw: Length = (uint)(num & 0x1F); break;
+                case TypePrefixes.FixArray: Length = (uint)(num & 0x0F); break;
+                case TypePrefixes.FixMap: Length = (uint)(num & 0x0F); break;
+                case TypePrefixes.Raw8: Length = (byte)_strm.ReadByte(); break;
+                case TypePrefixes.Raw16: _strm.Read(tmp, 0, 2); Length = (uint)((tmp[0] << 8) | tmp[1]); break;
+                case TypePrefixes.Raw32: _strm.Read(tmp, 0, 4); Length = (uint)((tmp[0] << 24) | (tmp[1] << 16) | (tmp[2] << 8) | tmp[3]); break;
+                case TypePrefixes.Array16: _strm.Read(tmp, 0, 2); Length = (uint)((tmp[0] << 8) | tmp[1]); break;
+                case TypePrefixes.Array32: _strm.Read(tmp, 0, 4); Length = (uint)((tmp[0] << 24) | (tmp[1] << 16) | (tmp[2] << 8) | tmp[3]); break;
+                case TypePrefixes.Map16: _strm.Read(tmp, 0, 2); Length = (uint)((tmp[0] << 8) | tmp[1]); break;
+                case TypePrefixes.Map32: _strm.Read(tmp, 0, 4); Length = (uint)((tmp[0] << 24) | (tmp[1] << 16) | (tmp[2] << 8) | tmp[3]); break;
+                case TypePrefixes.Nil: break;
+                default: throw new FormatException();
+            }
+            return true;
+        }
+
+        public int ReadValueRaw(byte[] buf, int offset, int count)
+        {
+            return _strm.Read(buf, offset, count);
+        }
+    }
+
+    public enum TypePrefixes : byte
+    {
+        PositiveFixNum = 0x00,
+        FixMap = 0x80,
+        FixArray = 0x90,
+        FixRaw = 0xa0,
+        Nil = 0xc0,
+        False = 0xc2,
+        True = 0xc3,
+        Float = 0xca,
+        Double = 0xcb,
+        UInt8 = 0xcc,
+        UInt16 = 0xcd,
+        UInt32 = 0xce,
+        UInt64 = 0xcf,
+        Int8 = 0xd0,
+        Int16 = 0xd1,
+        Int32 = 0xd2,
+        Int64 = 0xd3,
+        Raw8 = 0xd9,
+        Raw16 = 0xda,
+        Raw32 = 0xdb,
+        Array16 = 0xdc,
+        Array32 = 0xdd,
+        Map16 = 0xde,
+        Map32 = 0xdf,
+        NegativeFixNum = 0xe0
     }
 }
