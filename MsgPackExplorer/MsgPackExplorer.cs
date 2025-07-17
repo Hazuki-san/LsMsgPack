@@ -217,6 +217,14 @@ namespace MsgPackExplorer
                     keyNode.Nodes.Add(valueNode);
                     Traverse(valueNode, kvp.Value);
                 }
+            } else if (item is CustomMpRoot root)
+            {
+                foreach (var childItem in root.Items)
+                {
+                    TreeNode childNode = GetTreeNodeFor(childItem);
+                    node.Nodes.Add(childNode);
+                    Traverse(childNode, childItem);
+                }
             }
         }
 
@@ -230,6 +238,7 @@ namespace MsgPackExplorer
             if (item is CustomMpString) return 5;
             if (item is CustomMpArray) return 6;
             if (item is CustomMpMap) return 7;
+            if (item is CustomMpRoot) return 12; // Explore icon for root
             return -1;
         }
 
@@ -275,6 +284,17 @@ namespace CustomMsgPack
         public override string ToString()
         {
             return $"{TypeName}: {Value}";
+        }
+    }
+
+    public class CustomMpRoot : CustomMsgPackItem
+    {
+        public override object Value { get; set; }
+        public override string TypeName => "Root";
+        public List<CustomMsgPackItem> Items { get; set; } = new List<CustomMsgPackItem>();
+        public override string ToString()
+        {
+            return $"Root ({(Items?.Count ?? 0)} items)";
         }
     }
 
@@ -352,7 +372,13 @@ namespace CustomMsgPack
             using (var ms = new MemoryStream(buf))
             {
                 var reader = new CustomMsgPackReader(ms);
-                return Unpack(reader);
+                var items = new List<CustomMsgPackItem>();
+                while(ms.Position < ms.Length)
+                {
+                    items.Add(Unpack(reader));
+                }
+                if (items.Count == 1) return items[0];
+                return new CustomMpRoot { Items = items, Value = items };
             }
         }
 
